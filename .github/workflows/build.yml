@@ -13,7 +13,8 @@ jobs:
       - run: npm install -g eas-cli
       - run: npm install
       - name: Build APK
-        run: eas build --platform android --profile preview --non-interactive
+        run: eas build --platform android --profile preview --non-interactive --no-wait
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           EAS_NO_VCS: 1
+          EXPO_NO_KEYSTORE: 1
