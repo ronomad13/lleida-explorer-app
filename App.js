@@ -1,16 +1,36 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  StatusBar, Alert, Platform, AppState
+  StatusBar, Alert, Platform, AppState, Vibration
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const STORAGE_KEY = 'lleida_xp_v5';
-const BG_TASK = 'lleida-bg-v5';
+const STORAGE_KEY = 'lleida_xp_v6';
+const BG_TASK = 'lleida-bg-v6';
 const DETECT_RADIUS = 25;
+
+// Milestones de felicitació a partir del 50%
+const MILESTONES = [50, 60, 70, 80, 90, 100];
+
+// Colors de calor: de vermell transparent → vermell → taronja → groc → verd clar → verd
+const HEAT_COLORS = [
+  { visits: 0,  color: '#ff4444', opacity: 0.45, weight: 3 },  // no visitat
+  { visits: 1,  color: '#00e5a0', opacity: 0.7,  weight: 3 },  // 1 vegada
+  { visits: 3,  color: '#00c87a', opacity: 0.8,  weight: 4 },  // 3 vegades
+  { visits: 6,  color: '#00a855', opacity: 0.9,  weight: 5 },  // 6 vegades
+  { visits: 10, color: '#007a3d', opacity: 1.0,  weight: 6 },  // 10+ vegades
+];
+
+function getHeatStyle(visits) {
+  let style = HEAT_COLORS[0];
+  for (const h of HEAT_COLORS) {
+    if (visits >= h.visits) style = h;
+  }
+  return style;
+}
 
 function haversineMeters(a, b) {
   const R = 6371000;
@@ -45,7 +65,7 @@ TaskManager.defineTask(BG_TASK, async ({ data, error }) => {
   const { latitude, longitude } = data.locations[0].coords;
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    const saved = raw ? JSON.parse(raw) : { ids: [], streets: [] };
+    const saved = raw ? JSON.parse(raw) : { visits: {}, streets: [] };
     if (!saved.streets?.length) return;
 
     const pos = [latitude, longitude];
@@ -55,10 +75,10 @@ TaskManager.defineTask(BG_TASK, async ({ data, error }) => {
       if (d < minDist) { minDist = d; closest = street; }
     }
 
-    const visitedSet = new Set(saved.ids);
-    if (closest && minDist < DETECT_RADIUS && !visitedSet.has(closest.id)) {
-      visitedSet.add(closest.id);
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...saved, ids: [...visitedSet] }));
+    if (closest && minDist < DETECT_RADIUS) {
+      const visits = { ...(saved.visits || {}) };
+      visits[closest.id] = (visits[closest.id] || 0) + 1;
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...saved, visits }));
     }
   } catch(e) {}
 });
@@ -83,7 +103,8 @@ var map=L.map('map',{center:[41.6177,0.6200],zoom:15});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
 var segs={}, userMarker=null, userCircle=null;
 
-var Q='[out:json][timeout:30];(way["highway"~"^(residential|primary|secondary|tertiary|unclassified|living_street|pedestrian|footway|path|service|primary_link|secondary_link|tertiary_link)$"](41.595,0.575,41.655,0.670););out geom;';
+// Exclou carrers d'horta i camins rurals
+var Q='[out:json][timeout:30];(way["highway"~"^(residential|primary|secondary|tertiary|unclassified|living_street|pedestrian|primary_link|secondary_link|tertiary_link)$"]["name"](41.595,0.575,41.655,0.670););out geom;';
 
 fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:Q})
   .then(function(r){return r.json();}).then(function(data){
@@ -102,9 +123,10 @@ fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:Q})
     window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({type:'error'}));
   });
 
-function markVisited(ids){
-  ids.forEach(function(id){
-    if(segs[id])segs[id].layer.setStyle({color:'#00e5a0',weight:4,opacity:0.9});
+function updateHeat(updates){
+  // updates: [{id, color, opacity, weight}, ...]
+  updates.forEach(function(u){
+    if(segs[u.id])segs[u.id].layer.setStyle({color:u.color,weight:u.weight,opacity:u.opacity});
   });
 }
 function updatePos(lat,lng,acc){
@@ -127,6 +149,16 @@ function resetMap(){
 }
 </script></body></html>`;
 
+// ─── Milestone messages ───────────────────────────────────────────────────────
+const MILESTONE_MSG = {
+  50:  { title: '🎉 Meitat de Lleida!',    body: 'Ja has cobert el 50% dels carrers. Vas per bon camí!' },
+  60:  { title: '💪 60% cobert!',          body: 'Més de la meitat! Lleida ja no té secrets per a tu.' },
+  70:  { title: '🔥 70% cobert!',          body: 'Ja coneixes 7 de cada 10 carrers de Lleida. Increïble!' },
+  80:  { title: '⭐ 80% cobert!',          body: 'Gairebé un expert de Lleida. Continua!' },
+  90:  { title: '🏆 90% cobert!',          body: 'Quasi, quasi... La meta és a prop!' },
+  100: { title: '🥇 Lleida completada!',   body: 'Has caminat per tots els carrers de Lleida. Llegenda!' },
+};
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [statusMsg, setStatusMsg] = useState('Carregant mapa…');
@@ -137,8 +169,9 @@ export default function App() {
   const webRef = useRef(null);
   const locationSub = useRef(null);
   const streetsRef = useRef([]);
-  const visitedIds = useRef(new Set());
+  const visitsRef = useRef({});   // { streetId: count }
   const appState = useRef(AppState.currentState);
+  const lastMilestone = useRef(0);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', async nextState => {
@@ -154,13 +187,36 @@ export default function App() {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
     if (!raw) return;
     const saved = JSON.parse(raw);
-    const newIds = new Set(saved.ids || []);
-    const toMark = [...newIds].filter(id => !visitedIds.current.has(id));
-    if (toMark.length > 0) {
-      webRef.current?.injectJavaScript(`markVisited(${JSON.stringify(toMark)}); true;`);
+    const visits = saved.visits || {};
+    // Carrers amb visites noves
+    const updates = [];
+    for (const [id, count] of Object.entries(visits)) {
+      const prev = visitsRef.current[id] || 0;
+      if (count !== prev) {
+        const style = getHeatStyle(count);
+        updates.push({ id, ...style });
+      }
     }
-    visitedIds.current = newIds;
-    setVisited(newIds.size);
+    if (updates.length > 0) {
+      webRef.current?.injectJavaScript(`updateHeat(${JSON.stringify(updates)}); true;`);
+    }
+    visitsRef.current = visits;
+    const visitedCount = Object.keys(visits).length;
+    setVisited(visitedCount);
+  }
+
+  function checkMilestone(visitedCount, totalCount) {
+    if (!totalCount) return;
+    const pct = Math.round((visitedCount / totalCount) * 100);
+    for (const m of MILESTONES) {
+      if (pct >= m && lastMilestone.current < m) {
+        lastMilestone.current = m;
+        Vibration.vibrate([0, 200, 100, 200]);
+        const msg = MILESTONE_MSG[m];
+        Alert.alert(msg.title, msg.body);
+        break;
+      }
+    }
   }
 
   function onMessage(e) {
@@ -171,13 +227,21 @@ export default function App() {
         setTotal(msg.count);
         setStatusMsg(`${msg.count} carrers. Prem Iniciar.`);
         AsyncStorage.getItem(STORAGE_KEY).then(raw => {
-          const saved = raw ? JSON.parse(raw) : { ids: [] };
+          const saved = raw ? JSON.parse(raw) : { visits: {} };
           saved.streets = msg.streets;
           AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
-          if (saved.ids?.length) {
-            visitedIds.current = new Set(saved.ids);
-            setVisited(saved.ids.length);
-            webRef.current?.injectJavaScript(`markVisited(${JSON.stringify(saved.ids)}); true;`);
+          const visits = saved.visits || {};
+          visitsRef.current = visits;
+          const visitedCount = Object.keys(visits).length;
+          setVisited(visitedCount);
+          if (visitedCount > 0) {
+            const updates = Object.entries(visits).map(([id, count]) => ({ id, ...getHeatStyle(count) }));
+            webRef.current?.injectJavaScript(`updateHeat(${JSON.stringify(updates)}); true;`);
+          }
+          // Restaura milestone
+          const pct = msg.count ? Math.round((visitedCount / msg.count) * 100) : 0;
+          for (const m of [...MILESTONES].reverse()) {
+            if (pct >= m) { lastMilestone.current = m; break; }
           }
         });
       } else if (msg.type === 'error') {
@@ -195,15 +259,21 @@ export default function App() {
     }
     if (closest && minDist < DETECT_RADIUS) {
       setCurrentStreet(closest.name || 'Carrer sense nom');
-      if (!visitedIds.current.has(closest.id)) {
-        visitedIds.current.add(closest.id);
-        setVisited(visitedIds.current.size);
-        webRef.current?.injectJavaScript(`markVisited(['${closest.id}']); true;`);
-        AsyncStorage.getItem(STORAGE_KEY).then(raw => {
-          const saved = raw ? JSON.parse(raw) : { streets: [] };
-          AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...saved, ids: [...visitedIds.current] }));
-        });
-      }
+      const prevCount = visitsRef.current[closest.id] || 0;
+      const newCount = prevCount + 1;
+      visitsRef.current[closest.id] = newCount;
+      const newVisited = Object.keys(visitsRef.current).length;
+      setVisited(newVisited);
+      // Actualitza color al mapa
+      const style = getHeatStyle(newCount);
+      webRef.current?.injectJavaScript(`updateHeat([${JSON.stringify({ id: closest.id, ...style })}]); true;`);
+      // Guarda
+      AsyncStorage.getItem(STORAGE_KEY).then(raw => {
+        const saved = raw ? JSON.parse(raw) : { streets: [] };
+        AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...saved, visits: visitsRef.current }));
+      });
+      // Milestone
+      checkMilestone(newVisited, streetsRef.current.length);
     }
   }
 
@@ -218,7 +288,6 @@ export default function App() {
       const { status: fg } = await Location.requestForegroundPermissionsAsync();
       if (fg !== 'granted') { Alert.alert('Permís denegat', 'Cal permís de ubicació.'); return; }
       await Location.requestBackgroundPermissionsAsync();
-
       await Location.startLocationUpdatesAsync(BG_TASK, {
         accuracy: Location.Accuracy.Balanced,
         timeInterval: 10000,
@@ -230,7 +299,6 @@ export default function App() {
         },
         pausesUpdatesAutomatically: false,
       });
-
       setTracking(true);
       setStatusMsg('Buscant GPS…');
       locationSub.current = await Location.watchPositionAsync(
@@ -251,11 +319,12 @@ export default function App() {
     Alert.alert('Reset', 'Vols esborrar tot el progrés?', [
       { text: 'Cancel·la', style: 'cancel' },
       { text: 'Esborra', style: 'destructive', onPress: async () => {
-        visitedIds.current = new Set();
+        visitsRef.current = {};
+        lastMilestone.current = 0;
         setVisited(0);
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
         const saved = raw ? JSON.parse(raw) : {};
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ streets: saved.streets || [], ids: [] }));
+        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ streets: saved.streets || [], visits: {} }));
         webRef.current?.injectJavaScript(`resetMap(); true;`);
       }}
     ]);
