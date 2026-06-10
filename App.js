@@ -8,12 +8,10 @@ import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const STORAGE_KEY = 'lleida_xp_v4';
-const BG_TASK = 'lleida-bg-location';
+const STORAGE_KEY = 'lleida_xp_v5';
+const BG_TASK = 'lleida-bg-v5';
 const DETECT_RADIUS = 25;
-const WALK_REQUIRED = 15;
 
-// ─── Haversine ────────────────────────────────────────────────────────────────
 function haversineMeters(a, b) {
   const R = 6371000;
   const toRad = x => x * Math.PI / 180;
@@ -41,29 +39,16 @@ function distToPolyline(p, coords) {
   return min;
 }
 
-// ─── Background task (detecta carrers quan app en segon pla) ─────────────────
+// ─── Background task ──────────────────────────────────────────────────────────
 TaskManager.defineTask(BG_TASK, async ({ data, error }) => {
   if (error || !data?.locations?.length) return;
   const { latitude, longitude } = data.locations[0].coords;
-
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    const saved = raw ? JSON.parse(raw) : { ids: [], km: 0, streets: [] };
+    const saved = raw ? JSON.parse(raw) : { ids: [], streets: [] };
     if (!saved.streets?.length) return;
 
     const pos = [latitude, longitude];
-
-    // Km
-    const lastRaw = await AsyncStorage.getItem('lleida_last_pos');
-    let addedKm = 0;
-    if (lastRaw) {
-      const last = JSON.parse(lastRaw);
-      const d = haversineMeters(last, pos);
-      if (d < 100) addedKm = d / 1000;
-    }
-    await AsyncStorage.setItem('lleida_last_pos', JSON.stringify(pos));
-
-    // Detecció de carrer
     let minDist = Infinity, closest = null;
     for (const street of saved.streets) {
       const d = distToPolyline(pos, street.coords);
@@ -71,29 +56,10 @@ TaskManager.defineTask(BG_TASK, async ({ data, error }) => {
     }
 
     const visitedSet = new Set(saved.ids);
-    let changed = false;
-
     if (closest && minDist < DETECT_RADIUS && !visitedSet.has(closest.id)) {
-      const candidateRaw = await AsyncStorage.getItem('lleida_candidate');
-      const candidate = candidateRaw ? JSON.parse(candidateRaw) : null;
-
-      if (candidate && candidate.id === closest.id) {
-        const walked = haversineMeters([candidate.lat, candidate.lng], pos);
-        if (walked >= WALK_REQUIRED) {
-          visitedSet.add(closest.id);
-          changed = true;
-          await AsyncStorage.removeItem('lleida_candidate');
-        }
-      } else {
-        await AsyncStorage.setItem('lleida_candidate', JSON.stringify({ id: closest.id, lat: latitude, lng: longitude }));
-      }
+      visitedSet.add(closest.id);
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...saved, ids: [...visitedSet] }));
     }
-
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({
-      ...saved,
-      ids: [...visitedSet],
-      km: parseFloat(((saved.km || 0) + addedKm).toFixed(3))
-    }));
   } catch(e) {}
 });
 
@@ -107,8 +73,7 @@ const MAP_HTML = `<!DOCTYPE html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
-  html,body,#map{width:100%;height:100%;background:#0d0f14}
-  .leaflet-tile{filter:invert(1) hue-rotate(200deg) saturate(0.4) brightness(0.85)}
+  html,body,#map{width:100%;height:100%}
   .leaflet-control-attribution{display:none}
 </style>
 </head>
@@ -121,16 +86,18 @@ var segs={}, userMarker=null, userCircle=null;
 var Q='[out:json][timeout:30];(way["highway"~"^(residential|primary|secondary|tertiary|unclassified|living_street|pedestrian|footway|path|service|primary_link|secondary_link|tertiary_link)$"](41.595,0.575,41.655,0.670););out geom;';
 
 fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:Q})
-  .then(r=>r.json()).then(function(data){
+  .then(function(r){return r.json();}).then(function(data){
     var streets=[];
     data.elements.forEach(function(el){
       if(el.type!=='way'||!el.geometry)return;
       var coords=el.geometry.map(function(p){return[p.lat,p.lon]});
-      var layer=L.polyline(coords,{color:'#e05050',weight:2.5,opacity:0.6}).addTo(map);
-      segs[el.id]={layer:layer,name:(el.tags&&el.tags.name)||null,coords:coords};
+      var layer=L.polyline(coords,{color:'#ff4444',weight:3,opacity:0.45}).addTo(map);
+      segs[el.id]={layer:layer};
       streets.push({id:String(el.id),name:(el.tags&&el.tags.name)||null,coords:coords});
     });
-    window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({type:'loaded',count:streets.length,streets:streets}));
+    window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({
+      type:'loaded',count:streets.length,streets:streets
+    }));
   }).catch(function(){
     window.ReactNativeWebView&&window.ReactNativeWebView.postMessage(JSON.stringify({type:'error'}));
   });
@@ -153,7 +120,11 @@ function updatePos(lat,lng,acc){
   }
 }
 function centerOnUser(){if(userMarker)map.setView(userMarker.getLatLng(),17);}
-function resetMap(){Object.values(segs).forEach(function(s){s.layer.setStyle({color:'#e05050',weight:2.5,opacity:0.6});});}
+function resetMap(){
+  Object.values(segs).forEach(function(s){
+    s.layer.setStyle({color:'#ff4444',weight:3,opacity:0.45});
+  });
+}
 </script></body></html>`;
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -163,17 +134,12 @@ export default function App() {
   const [tracking, setTracking] = useState(false);
   const [visited, setVisited] = useState(0);
   const [total, setTotal] = useState(0);
-  const [kmWalked, setKmWalked] = useState(0);
   const webRef = useRef(null);
   const locationSub = useRef(null);
   const streetsRef = useRef([]);
   const visitedIds = useRef(new Set());
-  const totalMeters = useRef(0);
-  const lastPos = useRef(null);
-  const candidate = useRef(null);
   const appState = useRef(AppState.currentState);
 
-  // Refresca stats quan l'app torna a primer pla
   useEffect(() => {
     const sub = AppState.addEventListener('change', async nextState => {
       if (appState.current.match(/inactive|background/) && nextState === 'active') {
@@ -189,15 +155,12 @@ export default function App() {
     if (!raw) return;
     const saved = JSON.parse(raw);
     const newIds = new Set(saved.ids || []);
-    // Marca carrers nous al mapa
     const toMark = [...newIds].filter(id => !visitedIds.current.has(id));
     if (toMark.length > 0) {
       webRef.current?.injectJavaScript(`markVisited(${JSON.stringify(toMark)}); true;`);
     }
     visitedIds.current = newIds;
-    totalMeters.current = (saved.km || 0) * 1000;
     setVisited(newIds.size);
-    setKmWalked(saved.km || 0);
   }
 
   function onMessage(e) {
@@ -207,22 +170,18 @@ export default function App() {
         streetsRef.current = msg.streets;
         setTotal(msg.count);
         setStatusMsg(`${msg.count} carrers. Prem Iniciar.`);
-        // Guarda carrers a storage per al background task
         AsyncStorage.getItem(STORAGE_KEY).then(raw => {
-          const saved = raw ? JSON.parse(raw) : { ids: [], km: 0 };
+          const saved = raw ? JSON.parse(raw) : { ids: [] };
           saved.streets = msg.streets;
           AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
-          // Marca ja visitats
           if (saved.ids?.length) {
             visitedIds.current = new Set(saved.ids);
-            totalMeters.current = (saved.km || 0) * 1000;
             setVisited(saved.ids.length);
-            setKmWalked(saved.km || 0);
             webRef.current?.injectJavaScript(`markVisited(${JSON.stringify(saved.ids)}); true;`);
           }
         });
       } else if (msg.type === 'error') {
-        setStatusMsg('Error carregant mapa.');
+        setStatusMsg('Error carregant mapa. Comprova connexió.');
       }
     } catch(e) {}
   }
@@ -237,33 +196,15 @@ export default function App() {
     if (closest && minDist < DETECT_RADIUS) {
       setCurrentStreet(closest.name || 'Carrer sense nom');
       if (!visitedIds.current.has(closest.id)) {
-        if (!candidate.current || candidate.current.id !== closest.id) {
-          candidate.current = { id: closest.id, lat, lng };
-        } else {
-          const walked = haversineMeters([candidate.current.lat, candidate.current.lng], pos);
-          if (walked >= WALK_REQUIRED) {
-            visitedIds.current.add(closest.id);
-            setVisited(visitedIds.current.size);
-            webRef.current?.injectJavaScript(`markVisited(['${closest.id}']); true;`);
-            candidate.current = { id: closest.id, lat, lng };
-            saveProgress();
-          }
-        }
+        visitedIds.current.add(closest.id);
+        setVisited(visitedIds.current.size);
+        webRef.current?.injectJavaScript(`markVisited(['${closest.id}']); true;`);
+        AsyncStorage.getItem(STORAGE_KEY).then(raw => {
+          const saved = raw ? JSON.parse(raw) : { streets: [] };
+          AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...saved, ids: [...visitedIds.current] }));
+        });
       }
-    } else {
-      candidate.current = null;
     }
-  }
-
-  function saveProgress() {
-    AsyncStorage.getItem(STORAGE_KEY).then(raw => {
-      const saved = raw ? JSON.parse(raw) : { streets: [] };
-      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({
-        ...saved,
-        ids: [...visitedIds.current],
-        km: parseFloat((totalMeters.current / 1000).toFixed(3))
-      }));
-    });
   }
 
   async function toggleTracking() {
@@ -272,20 +213,12 @@ export default function App() {
       locationSub.current = null;
       await Location.stopLocationUpdatesAsync(BG_TASK).catch(() => {});
       setTracking(false);
-      lastPos.current = null;
       setStatusMsg('Tracking aturat.');
     } else {
       const { status: fg } = await Location.requestForegroundPermissionsAsync();
-      if (fg !== 'granted') {
-        Alert.alert('Permís denegat', 'Cal permís de ubicació.');
-        return;
-      }
-      const { status: bg } = await Location.requestBackgroundPermissionsAsync();
-      if (bg !== 'granted') {
-        Alert.alert('Permís en segon pla', 'Per al tracking amb pantalla bloquejada ves a Configuració → Apps → LleidaXP → Ubicació → Sempre.');
-      }
+      if (fg !== 'granted') { Alert.alert('Permís denegat', 'Cal permís de ubicació.'); return; }
+      await Location.requestBackgroundPermissionsAsync();
 
-      // Inicia background task
       await Location.startLocationUpdatesAsync(BG_TASK, {
         accuracy: Location.Accuracy.Balanced,
         timeInterval: 10000,
@@ -296,10 +229,8 @@ export default function App() {
           notificationColor: '#00e5a0',
         },
         pausesUpdatesAutomatically: false,
-        showsBackgroundLocationIndicator: true,
       });
 
-      // Primer pla (més precís mentre app oberta)
       setTracking(true);
       setStatusMsg('Buscant GPS…');
       locationSub.current = await Location.watchPositionAsync(
@@ -307,15 +238,6 @@ export default function App() {
         loc => {
           const { latitude, longitude, accuracy: acc } = loc.coords;
           setStatusMsg(`GPS actiu · ~${Math.round(acc)}m`);
-          const pos = [latitude, longitude];
-          if (lastPos.current) {
-            const d = haversineMeters(lastPos.current, pos);
-            if (d < 100) {
-              totalMeters.current += d;
-              setKmWalked(parseFloat((totalMeters.current / 1000).toFixed(2)));
-            }
-          }
-          lastPos.current = pos;
           webRef.current?.injectJavaScript(`updatePos(${latitude},${longitude},${acc}); true;`);
           detectStreet(latitude, longitude);
         }
@@ -330,12 +252,10 @@ export default function App() {
       { text: 'Cancel·la', style: 'cancel' },
       { text: 'Esborra', style: 'destructive', onPress: async () => {
         visitedIds.current = new Set();
-        totalMeters.current = 0;
-        candidate.current = null;
-        setVisited(0); setKmWalked(0);
-        await AsyncStorage.removeItem(STORAGE_KEY);
-        await AsyncStorage.removeItem('lleida_last_pos');
-        await AsyncStorage.removeItem('lleida_candidate');
+        setVisited(0);
+        const raw = await AsyncStorage.getItem(STORAGE_KEY);
+        const saved = raw ? JSON.parse(raw) : {};
+        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ streets: saved.streets || [], ids: [] }));
         webRef.current?.injectJavaScript(`resetMap(); true;`);
       }}
     ]);
@@ -352,7 +272,6 @@ export default function App() {
           <View style={s.stat}><Text style={s.statVal}>{visited}</Text><Text style={s.statLabel}>VISITADES</Text></View>
           <View style={s.stat}><Text style={s.statVal}>{total||'—'}</Text><Text style={s.statLabel}>TOTAL</Text></View>
           <View style={s.stat}><Text style={s.statVal}>{pct}%</Text><Text style={s.statLabel}>COBERT</Text></View>
-          <View style={s.stat}><Text style={s.statVal}>{kmWalked}</Text><Text style={s.statLabel}>KM</Text></View>
         </View>
       </View>
       <WebView ref={webRef} style={s.map} source={{html:MAP_HTML}} onMessage={onMessage}
@@ -389,7 +308,7 @@ const s = StyleSheet.create({
   header:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:10,backgroundColor:'#161921',borderBottomWidth:1,borderBottomColor:'#252a36'},
   logo:{fontSize:20,fontWeight:'800',color:'#e8eaf0'},
   accent:{color:'#00e5a0'},
-  statsRow:{flexDirection:'row',gap:12},
+  statsRow:{flexDirection:'row',gap:16},
   stat:{alignItems:'center'},
   statVal:{fontSize:15,fontWeight:'700',color:'#00e5a0'},
   statLabel:{fontSize:9,color:'#5a6175'},
