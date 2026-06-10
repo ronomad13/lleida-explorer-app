@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "LleidaXP",
+    "slug": "lleida-xp",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "backgroundColor": "#0d0f14",
+    "android": {
+      "package": "com.lleidaxp.explorer",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "LleidaXP necessita accés a la ubicació per marcar els carrers que visites, fins i tot amb la pantalla bloquejada.",
+          "locationAlwaysPermission": "LleidaXP necessita accés continu a la ubicació per al tracking en segon pla.",
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ]
+    ]
+  }
+}
