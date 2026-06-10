@@ -5,13 +5,13 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "backgroundColor": "#0d0f14",
+    "extra": {
+      "eas": {
+        "projectId": "814f15e9-a784-47a2-9659-1797959e2a98"
+      }
+    },
     "android": {
-      "package": "com.lleidaxp.explorer",
-      "permissions": [
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION"
-      ]
+      "package": "com.lleidaxp.explorer"
     },
     "plugins": [
       [
