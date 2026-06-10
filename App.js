@@ -7,7 +7,7 @@ import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const STORAGE_KEY = 'lleida_xp_v2';
+const STORAGE_KEY = 'lleida_xp_v3';
 
 const MAP_HTML = `
 <!DOCTYPE html>
@@ -34,6 +34,11 @@ var allSegments = {};
 var userMarker = null;
 var userCircle = null;
 
+// Candidat actual: carrer on s'esta caminant ara
+var candidate = null;       // { id, name, entryPos }
+var CANDIDATE_DIST = 25;    // metres per considerar "dins el carrer"
+var WALK_REQUIRED = 15;     // metres que cal caminar dins el carrer
+
 var OVERPASS = '[out:json][timeout:30];(way["highway"~"^(residential|primary|secondary|tertiary|unclassified|living_street|pedestrian|footway|path|service|primary_link|secondary_link|tertiary_link)$"](41.595,0.575,41.655,0.670););out geom;';
 
 fetch('https://overpass-api.de/api/interpreter', { method:'POST', body:OVERPASS })
@@ -42,10 +47,13 @@ fetch('https://overpass-api.de/api/interpreter', { method:'POST', body:OVERPASS 
     data.elements.forEach(el => {
       if (el.type !== 'way' || !el.geometry) return;
       var coords = el.geometry.map(p => [p.lat, p.lon]);
-      var layer = L.polyline(coords, { color:'#2a3040', weight:2.5, opacity:0.6 }).addTo(map);
+      // No visitat = vermell
+      var layer = L.polyline(coords, { color:'#e05050', weight:2.5, opacity:0.6 }).addTo(map);
       allSegments[el.id] = { layer, name: el.tags && el.tags.name || null, coords };
     });
-    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'loaded', count: Object.keys(allSegments).length }));
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+      type:'loaded', count: Object.keys(allSegments).length
+    }));
   })
   .catch(() => {
     window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'error' }));
@@ -66,7 +74,7 @@ function updatePosition(lat, lng, acc) {
 }
 
 function markVisited(ids) {
-  ids.forEach(id => {
+  ids.forEach(function(id) {
     if (allSegments[id]) {
       allSegments[id].layer.setStyle({ color:'#00e5a0', weight:4, opacity:0.9 });
     }
@@ -75,12 +83,33 @@ function markVisited(ids) {
 
 function detectStreet(lat, lng) {
   var minDist = Infinity, closest = null;
-  Object.entries(allSegments).forEach(([id, seg]) => {
+  Object.entries(allSegments).forEach(function(entry) {
+    var id = entry[0], seg = entry[1];
     var d = distToPolyline([lat,lng], seg.coords);
-    if (d < minDist) { minDist = d; closest = { id, name: seg.name }; }
+    if (d < minDist) { minDist = d; closest = { id:id, name:seg.name }; }
   });
-  if (closest && minDist < 25) {
-    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type:'street', id: closest.id, name: closest.name }));
+
+  if (closest && minDist < CANDIDATE_DIST) {
+    if (!candidate || candidate.id !== closest.id) {
+      // Entrem a un carrer nou
+      candidate = { id: closest.id, name: closest.name, entryLat: lat, entryLng: lng };
+    } else {
+      // Continuem al mateix carrer — comprovem distancia recorreguda
+      var walked = haver([lat,lng], [candidate.entryLat, candidate.entryLng]);
+      if (walked >= WALK_REQUIRED) {
+        window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+          type:'street', id: candidate.id, name: candidate.name
+        }));
+        // Reiniciem el candidat per no re-enviar contínuament
+        candidate.entryLat = lat;
+        candidate.entryLng = lng;
+      }
+    }
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+      type:'nearstreet', name: closest.name || 'Carrer sense nom'
+    }));
+  } else {
+    candidate = null;
   }
 }
 
@@ -94,8 +123,7 @@ function distToPolyline(p, coords) {
 }
 
 function distToSeg(p, a, b) {
-  var R = 6371000, tr = function(x){ return x*Math.PI/180; };
-  var ax=tr(a[0]),ay=tr(a[1]),bx=tr(b[0]),by=tr(b[1]),px=tr(p[0]),py=tr(p[1]);
+  var ax=toRad(a[0]),ay=toRad(a[1]),bx=toRad(b[0]),by=toRad(b[1]),px=toRad(p[0]),py=toRad(p[1]);
   var ab2=(bx-ax)**2+(by-ay)**2;
   if(ab2===0) return haver(p,a);
   var t=Math.max(0,Math.min(1,((px-ax)*(bx-ax)+(py-ay)*(by-ay))/ab2));
@@ -103,20 +131,23 @@ function distToSeg(p, a, b) {
 }
 
 function haver(a,b) {
-  var R=6371000,tr=function(x){return x*Math.PI/180;};
-  var dLat=tr(b[0]-a[0]),dLon=tr(b[1]-a[1]);
-  var s=Math.sin(dLat/2)**2+Math.cos(tr(a[0]))*Math.cos(tr(b[0]))*Math.sin(dLon/2)**2;
+  var R=6371000;
+  var dLat=toRad(b[0]-a[0]),dLon=toRad(b[1]-a[1]);
+  var s=Math.sin(dLat/2)**2+Math.cos(toRad(a[0]))*Math.cos(toRad(b[0]))*Math.sin(dLon/2)**2;
   return R*2*Math.asin(Math.sqrt(s));
 }
+
+function toRad(x) { return x*Math.PI/180; }
 
 function centerOnUser() {
   if (userMarker) map.setView(userMarker.getLatLng(), 17);
 }
 
 function resetMap() {
-  Object.values(allSegments).forEach(seg => {
-    seg.layer.setStyle({ color:'#2a3040', weight:2.5, opacity:0.6 });
+  Object.values(allSegments).forEach(function(seg) {
+    seg.layer.setStyle({ color:'#e05050', weight:2.5, opacity:0.6 });
   });
+  candidate = null;
 }
 </script>
 </body>
@@ -129,15 +160,20 @@ export default function App() {
   const [tracking, setTracking] = useState(false);
   const [visited, setVisited] = useState(0);
   const [total, setTotal] = useState(0);
+  const [kmWalked, setKmWalked] = useState(0);
   const webRef = useRef(null);
   const locationSub = useRef(null);
   const visitedIds = useRef(new Set());
+  const lastPos = useRef(null);
+  const totalMeters = useRef(0);
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then(val => {
       if (val) {
-        const ids = JSON.parse(val);
-        visitedIds.current = new Set(ids);
+        const data = JSON.parse(val);
+        visitedIds.current = new Set(data.ids || []);
+        totalMeters.current = data.km ? data.km * 1000 : 0;
+        setKmWalked(data.km || 0);
       }
     });
   }, []);
@@ -152,12 +188,13 @@ export default function App() {
           webRef.current?.injectJavaScript(`markVisited(${JSON.stringify([...visitedIds.current])}); true;`);
           setVisited(visitedIds.current.size);
         }
+      } else if (msg.type === 'nearstreet') {
+        setCurrentStreet(msg.name);
       } else if (msg.type === 'street') {
-        setCurrentStreet(msg.name || 'Carrer sense nom');
         if (!visitedIds.current.has(msg.id)) {
           visitedIds.current.add(msg.id);
           setVisited(visitedIds.current.size);
-          AsyncStorage.setItem(STORAGE_KEY, JSON.stringify([...visitedIds.current]));
+          saveProgress();
           webRef.current?.injectJavaScript(`markVisited(['${msg.id}']); true;`);
         }
       } else if (msg.type === 'error') {
@@ -166,11 +203,28 @@ export default function App() {
     } catch(e) {}
   }
 
+  function saveProgress() {
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({
+      ids: [...visitedIds.current],
+      km: parseFloat(kmWalked.toFixed(2))
+    }));
+  }
+
+  function haversineMeters(a, b) {
+    const R = 6371000;
+    const toRad = x => x * Math.PI / 180;
+    const dLat = toRad(b[0] - a[0]);
+    const dLon = toRad(b[1] - a[1]);
+    const s = Math.sin(dLat/2)**2 + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLon/2)**2;
+    return R * 2 * Math.asin(Math.sqrt(s));
+  }
+
   async function toggleTracking() {
     if (tracking) {
       locationSub.current?.remove();
       locationSub.current = null;
       setTracking(false);
+      lastPos.current = null;
       setStatusMsg('Tracking aturat.');
     } else {
       const { status: fg } = await Location.requestForegroundPermissionsAsync();
@@ -185,7 +239,19 @@ export default function App() {
         { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 5000, distanceInterval: 5 },
         loc => {
           const { latitude, longitude, accuracy: acc } = loc.coords;
-          setStatusMsg(`GPS actiu · ~${Math.round(acc)}m`);
+          setStatusMsg(`GPS actiu · ~${Math.round(acc)}m precisió`);
+
+          // Calcula km caminats
+          if (lastPos.current) {
+            const d = haversineMeters(lastPos.current, [latitude, longitude]);
+            if (d < 100) { // ignora salts GPS erronis
+              totalMeters.current += d;
+              const km = parseFloat((totalMeters.current / 1000).toFixed(2));
+              setKmWalked(km);
+            }
+          }
+          lastPos.current = [latitude, longitude];
+
           webRef.current?.injectJavaScript(`updatePosition(${latitude}, ${longitude}, ${acc}); true;`);
         }
       );
@@ -197,11 +263,13 @@ export default function App() {
   }
 
   function resetProgress() {
-    Alert.alert('Reset', 'Vols esborrar tot el progrés?', [
+    Alert.alert('Reset', 'Vols esborrar tot el progrés i els km?', [
       { text: 'Cancel·la', style: 'cancel' },
       { text: 'Esborra', style: 'destructive', onPress: () => {
         visitedIds.current = new Set();
+        totalMeters.current = 0;
         setVisited(0);
+        setKmWalked(0);
         AsyncStorage.removeItem(STORAGE_KEY);
         webRef.current?.injectJavaScript(`resetMap(); true;`);
       }}
@@ -219,6 +287,7 @@ export default function App() {
           <View style={s.stat}><Text style={s.statVal}>{visited}</Text><Text style={s.statLabel}>VISITADES</Text></View>
           <View style={s.stat}><Text style={s.statVal}>{total||'—'}</Text><Text style={s.statLabel}>TOTAL</Text></View>
           <View style={s.stat}><Text style={s.statVal}>{pct}%</Text><Text style={s.statLabel}>COBERT</Text></View>
+          <View style={s.stat}><Text style={s.statVal}>{kmWalked}</Text><Text style={s.statLabel}>KM</Text></View>
         </View>
       </View>
       <WebView
@@ -263,9 +332,9 @@ const s = StyleSheet.create({
   header: { flexDirection:'row', alignItems:'center', justifyContent:'space-between', paddingHorizontal:16, paddingVertical:10, backgroundColor:'#161921', borderBottomWidth:1, borderBottomColor:'#252a36' },
   logo: { fontSize:20, fontWeight:'800', color:'#e8eaf0' },
   accent: { color:'#00e5a0' },
-  statsRow: { flexDirection:'row', gap:16 },
+  statsRow: { flexDirection:'row', gap:12 },
   stat: { alignItems:'center' },
-  statVal: { fontSize:16, fontWeight:'700', color:'#00e5a0' },
+  statVal: { fontSize:15, fontWeight:'700', color:'#00e5a0' },
   statLabel: { fontSize:9, color:'#5a6175' },
   map: { flex:1 },
   panel: { backgroundColor:'#161921', borderTopWidth:1, borderTopColor:'#252a36', paddingHorizontal:16, paddingTop:10, paddingBottom:20 },
